@@ -2,6 +2,8 @@
 pragma solidity ^0.8.7;
 
 import "./IERC721.sol";
+import "./IBCCoin.sol";
+import "./library/SafeToken.sol";
 
 // Errors
 error BusinessCardMarketplace__OnlyOwner();
@@ -13,6 +15,7 @@ error BusinessCardMarketplace__ApproveNotCleared();
 
 contract BusinessCardMarketplace {
     // State Variables
+    IBCCoin internal bcCoin;
     struct Listing {
         uint256 listId;
         uint256 price;
@@ -49,6 +52,10 @@ contract BusinessCardMarketplace {
         _;
     }
 
+    function __BusinessCardMarketplace__init(address _BCCoinAddress) external {
+        bcCoin = IBCCoin(_BCCoinAddress);
+    }
+
     function createListing(
         address _nftAddress,
         uint256 _price,
@@ -80,12 +87,27 @@ contract BusinessCardMarketplace {
         emit ListingRemoved(_cardId, msg.sender);
     }
 
-    function buyCard(address _nftAddress, uint256 _cardId) external payable Listed(_nftAddress, _cardId) {
+    function buyCardETH(address _nftAddress, uint256 _cardId) external payable Listed(_nftAddress, _cardId) {
         Listing memory listing = listings[_nftAddress][_cardId];
-        if (msg.value < listing.price) {
+        if (msg.value != listing.price) {
             revert BusinessCardMarketplace__InvalidPrice();
         }
         payable(listing.seller).transfer(msg.value);
+        SafeToken.safeTransferETH(payable(listing.seller), msg.value);
+        _buyCard(_nftAddress, _cardId, listing);
+    }
+
+    function buyCard(
+        address _nftAddress,
+        address _tokenAddress,
+        uint256 _cardId
+    ) external payable Listed(_nftAddress, _cardId) {
+        Listing memory listing = listings[_nftAddress][_cardId];
+        SafeToken.safeTransfer(_tokenAddress, payable(listing.seller), msg.value);
+        _buyCard(_nftAddress, _cardId, listing);
+    }
+
+    function _buyCard(address _nftAddress, uint256 _cardId, Listing memory listing) internal {
         IERC721(_nftAddress).safeTransferFrom(listing.seller, msg.sender, _cardId);
         delete listings[_nftAddress][_cardId];
         emit ListingBought(_cardId, msg.sender, listing.seller, listing.price);

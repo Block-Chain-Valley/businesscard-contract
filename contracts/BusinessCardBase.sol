@@ -3,6 +3,8 @@ pragma solidity ^0.8.7;
 
 import "./ERC721EnumerableUpgradeable.sol";
 import "./access/Ownable.sol";
+import "./security/ReentrancyGuard.sol";
+import "./library/SafeToken.sol";
 import "./IBCCoin.sol";
 
 // Errors
@@ -16,7 +18,7 @@ error BusinessCardBase__InvalidArrayCount();
 error BusinessCardBase__StakeNotExpired();
 error BusinessCardBase__WithdrawFailed();
 
-contract BusinessCardBase is ERC721EnumerableUpgradeable {
+contract BusinessCardBase is ERC721EnumerableUpgradeable, ReentrancyGuard {
     enum CardType {
         Personal,
         Business
@@ -26,7 +28,7 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
     uint32 internal constant MAX_CARDS = 1000;
     uint32 internal constant MAX_FIRST_MINT = 10;
     uint32 constant MAX_EMPLOYEES = 10;
-    uint32 constant MAX_DECIMALS = 10 ^ 18;
+    uint256 constant MAX_DECIMALS = 10 ** 18;
     uint256 internal stakePrice;
     uint256 internal firstMintPrice;
     uint256 internal mintPrice;
@@ -36,10 +38,10 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
 
     // Mappings
     mapping(address => bool) internal firstMinted;
-    mapping(address => mapping(address => uint256)) internal addressToDivisionToMintable;
+    mapping(address => mapping(address => uint256)) internal mintableCountOf;
     mapping(address => uint256) internal stakedTime;
     mapping(address => bool) internal successfullyStaked;
-    mapping(address => string) internal addressToCompanyName;
+    mapping(address => string) internal companyNameOf;
 
     struct Card {
         string name;
@@ -66,18 +68,9 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
     event Stake(address indexed staker, uint256 amount, string companyName);
     event PartyMint(address indexed company, address[] employeeAddresses, uint32 employeeCount);
     event bcCoinMinted(address indexed to, uint256 amount);
+    event CompanyBCProceedsRedeemed(address indexed company, uint256 amount);
 
     // Functions
-    modifier isMintable(address _company) {
-        if (
-            addressToDivisionToMintable[msg.sender][_company] <= 0 &&
-            addressToDivisionToMintable[msg.sender][msg.sender] <= 0
-        ) {
-            revert BusinessCardBase__NotMintable();
-        }
-        _;
-    }
-
     modifier onlyStaked() {
         if (successfullyStaked[msg.sender] == false) {
             revert BusinessCardBase__NotStaked();
@@ -99,34 +92,43 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         bcCoin = IBCCoin(bcCoinAddress);
     }
 
-    function mint() public payable returns (bool success) {
+    function BCMint() public payable returns (bool success) {
+        uint mintableAmount;
+        uint bcAmount;
         if (firstMinted[msg.sender]) {
             if (msg.value != mintPrice) {
                 revert BusinessCardBase__InvalidETHAmountSent();
             }
-            addressToDivisionToMintable[msg.sender][msg.sender] += 1;
-            bcCoinFactory(msg.sender, BC_COIN_PER_MINT);
+            mintableAmount = 1;
+            bcAmount = BC_COIN_PER_MINT;
         } else {
             if (msg.value != firstMintPrice) {
                 revert BusinessCardBase__InvalidETHAmountSent();
             }
             firstMinted[msg.sender] = true;
-            addressToDivisionToMintable[msg.sender][msg.sender] = MAX_FIRST_MINT;
-            bcCoinFactory(msg.sender, BC_COIN_PER_MINT * 10);
+
+            mintableAmount = MAX_FIRST_MINT;
+            bcAmount = BC_COIN_PER_MINT * 10;
         }
+        mintableCountOf[msg.sender][msg.sender] += MAX_FIRST_MINT;
+        bcCoinFactory(msg.sender, bcAmount);
+        emit bcCoinMinted(msg.sender, bcAmount);
 
         // ADD REFUND LOGIC WHEN MORE THAN ENOUGH ETH IS SENT
 
         return true;
     }
 
-    function _mint(
+    function _BCmint(
         string memory _name,
         string memory _email,
         string memory _phone,
         address _company,
         uint256 valueDesired
-    ) public virtual isMintable(_company) {
+    ) public virtual {
+        if (mintableCountOf[msg.sender][_company] <= 0 && mintableCountOf[msg.sender][msg.sender] <= 0) {
+            revert BusinessCardBase__NotMintable();
+        }
         if (
             bytes(_name).length * bytes(_email).length * bytes(_phone).length * valueDesired == 0 || _company == address(0)
         ) {
@@ -134,7 +136,7 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         }
 
         CardType cardType;
-        string memory company = addressToCompanyName[_company];
+        string memory company = companyNameOf[_company];
         if (bytes(company).length == 0 || (msg.sender == _company)) {
             cardType = CardType.Personal;
         } else {
@@ -153,7 +155,7 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
 
         cards.push(card);
         uint256 _id = cards.length - 1;
-        addressToDivisionToMintable[msg.sender][msg.sender] -= 1;
+        mintableCountOf[msg.sender][msg.sender] -= 1;
         _safeMint(msg.sender, _id);
         if (cardType == CardType.Business) approve(_company, _id);
         emit CardCreated(_id, _name, _email, _phone, company, cardType, valueDesired, msg.sender);
@@ -165,27 +167,27 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         }
 
         successfullyStaked[msg.sender] = true;
-        addressToCompanyName[msg.sender] = _company;
+        companyNameOf[msg.sender] = _company;
         stakedTime[msg.sender] = block.timestamp;
         emit Stake(msg.sender, msg.value, _company);
 
         return true;
     }
 
-    function withdraw() external onlyStaked {
+    function withdraw() external onlyStaked nonReentrant {
         if (block.timestamp - stakedTime[msg.sender] < STAKE_TIME) {
             revert BusinessCardBase__StakeNotExpired();
         }
         (bool success, ) = payable(msg.sender).call{value: stakePrice}("");
         successfullyStaked[msg.sender] = false;
-        addressToCompanyName[msg.sender] = "";
+        companyNameOf[msg.sender] = "";
         stakedTime[msg.sender] = 0;
         if (!success) {
             revert BusinessCardBase__WithdrawFailed();
         }
     }
 
-    function partyMint(
+    function partyBCMint(
         uint256 _employeeCount,
         address[] memory employeeAddresses
     ) external payable onlyStaked returns (bool success) {
@@ -201,7 +203,7 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
 
         address companyAddress = msg.sender;
         for (uint256 i = 0; i < _employeeCount; i++) {
-            addressToDivisionToMintable[employeeAddresses[i]][companyAddress] += 1;
+            mintableCountOf[employeeAddresses[i]][companyAddress] += 1;
         }
 
         emit PartyMint(msg.sender, employeeAddresses, uint32(_employeeCount));
@@ -209,21 +211,20 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         return true;
     }
 
-    function redeemBCProceeds() external onlyStaked {
+    function redeemCompanyBCProceeds() external onlyStaked {
         uint256 timeSinceStake = block.timestamp - stakedTime[msg.sender];
-        uint256 proceeds = timeSinceStake / 1 days;
+        uint256 proceeds = timeSinceStake / 86400;
         if (proceeds > 0) {
             bcCoinFactory(msg.sender, proceeds);
-            stakedTime[msg.sender] += proceeds * 1 days;
+            stakedTime[msg.sender] += proceeds * 86400;
         }
+        emit CompanyBCProceedsRedeemed(msg.sender, proceeds);
     }
 
     function bcCoinFactory(address _to, uint256 _amount) private {
         bcCoin.mint(_to, _amount);
         emit bcCoinMinted(_to, _amount);
     }
-
-    function convertBCCoinToPrize(uint256 _BCCoinAmount) external payable {}
 
     function _transfer(address _from, address _to, uint256 _tokenId) internal virtual override {
         super._transfer(_from, _to, _tokenId);
@@ -263,17 +264,19 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
     }
 
     function getCompanyName(address companyAddress) external view returns (string memory) {
-        return addressToCompanyName[companyAddress];
+        return companyNameOf[companyAddress];
     }
 
     function getMintableAuthorities(address _owner, address _company) external view returns (uint256) {
-        return addressToDivisionToMintable[_owner][_company];
+        return mintableCountOf[_owner][_company];
     }
 }
-
 // modifier 1번 사용시 굳이 함수로 빼지 않아도 될 것 같습니다.
 // mintable count of (mapping name convention)
-// permit
 // erc20 logic
+
+// permit
 // erc20 -> marketplace
 // marketplace auction
+
+// BC코인 -> mintable++
