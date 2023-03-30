@@ -3,6 +3,7 @@ pragma solidity ^0.8.7;
 
 import "./ERC721EnumerableUpgradeable.sol";
 import "./access/Ownable.sol";
+import "./IBCCoin.sol";
 
 // Errors
 error BusinessCardBase__NotFirstMint();
@@ -12,6 +13,8 @@ error BusinessCardBase__NotMintable();
 error BusinessCardBase__NotStaked();
 error BusinessCardBase__ExceededPeople();
 error BusinessCardBase__InvalidArrayCount();
+error BusinessCardBase__StakeNotExpired();
+error BusinessCardBase__WithdrawFailed();
 
 contract BusinessCardBase is ERC721EnumerableUpgradeable {
     enum CardType {
@@ -28,6 +31,8 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
     uint256 internal firstMintPrice;
     uint256 internal mintPrice;
     uint256 constant STAKE_TIME = 180 days;
+    IBCCoin internal bcCoin;
+    uint256 constant BC_COIN_PER_MINT = 10;
 
     // Mappings
     mapping(address => bool) internal firstMinted;
@@ -53,16 +58,21 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         string email,
         string phone,
         string company,
+        CardType cardType,
         uint256 valueDesired,
         address owner
     );
     event CardTransfer(uint256 indexed id, address indexed from, address indexed to);
     event Stake(address indexed staker, uint256 amount, string companyName);
     event PartyMint(address indexed company, address[] employeeAddresses, uint32 employeeCount);
+    event bcCoinMinted(address indexed to, uint256 amount);
 
     // Functions
-    modifier isMintable() {
-        if (addressToDivisionToMintable[msg.sender][msg.sender] <= 0) {
+    modifier isMintable(address _company) {
+        if (
+            addressToDivisionToMintable[msg.sender][_company] <= 0 &&
+            addressToDivisionToMintable[msg.sender][msg.sender] <= 0
+        ) {
             revert BusinessCardBase__NotMintable();
         }
         _;
@@ -76,11 +86,17 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         _;
     }
 
-    function __BusinessCardBase__init(uint256 _firstMintPrice, uint256 _mintPrice, uint256 _stakePrice) internal {
-        __ERC721_init("BusinessCardBase", "BC");
+    function __BusinessCardBase__init(
+        uint256 _firstMintPrice,
+        uint256 _mintPrice,
+        uint256 _stakePrice,
+        address bcCoinAddress
+    ) external {
+        // __ERC721_init("BusinessCardBase", "BC");
         firstMintPrice = _firstMintPrice;
         mintPrice = _mintPrice;
         stakePrice = _stakePrice;
+        bcCoin = IBCCoin(bcCoinAddress);
     }
 
     function mint() public payable returns (bool success) {
@@ -89,13 +105,17 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
                 revert BusinessCardBase__InvalidETHAmountSent();
             }
             addressToDivisionToMintable[msg.sender][msg.sender] += 1;
+            bcCoinFactory(msg.sender, BC_COIN_PER_MINT);
         } else {
             if (msg.value != firstMintPrice) {
                 revert BusinessCardBase__InvalidETHAmountSent();
             }
             firstMinted[msg.sender] = true;
             addressToDivisionToMintable[msg.sender][msg.sender] = MAX_FIRST_MINT;
+            bcCoinFactory(msg.sender, BC_COIN_PER_MINT * 10);
         }
+
+        // ADD REFUND LOGIC WHEN MORE THAN ENOUGH ETH IS SENT
 
         return true;
     }
@@ -106,14 +126,11 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         string memory _phone,
         address _company,
         uint256 valueDesired
-    ) public virtual isMintable {
+    ) public virtual isMintable(_company) {
         if (
             bytes(_name).length * bytes(_email).length * bytes(_phone).length * valueDesired == 0 || _company == address(0)
         ) {
             revert BusinessCardBase__InvalidString();
-        }
-        if (addressToDivisionToMintable[msg.sender][_company] <= 0) {
-            revert BusinessCardBase__NotMintable();
         }
 
         CardType cardType;
@@ -139,20 +156,33 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         addressToDivisionToMintable[msg.sender][msg.sender] -= 1;
         _safeMint(msg.sender, _id);
         if (cardType == CardType.Business) approve(_company, _id);
-        emit CardCreated(_id, _name, _email, _phone, company, valueDesired, msg.sender);
+        emit CardCreated(_id, _name, _email, _phone, company, cardType, valueDesired, msg.sender);
     }
 
     function stake(string memory _company) public payable returns (bool success) {
         if (msg.value != stakePrice) {
-            revert BusinessCardBase__NotStaked();
+            revert BusinessCardBase__InvalidETHAmountSent();
         }
 
         successfullyStaked[msg.sender] = true;
         addressToCompanyName[msg.sender] = _company;
-
+        stakedTime[msg.sender] = block.timestamp;
         emit Stake(msg.sender, msg.value, _company);
 
         return true;
+    }
+
+    function withdraw() external onlyStaked {
+        if (block.timestamp - stakedTime[msg.sender] < STAKE_TIME) {
+            revert BusinessCardBase__StakeNotExpired();
+        }
+        (bool success, ) = payable(msg.sender).call{value: stakePrice}("");
+        successfullyStaked[msg.sender] = false;
+        addressToCompanyName[msg.sender] = "";
+        stakedTime[msg.sender] = 0;
+        if (!success) {
+            revert BusinessCardBase__WithdrawFailed();
+        }
     }
 
     function partyMint(
@@ -179,6 +209,22 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         return true;
     }
 
+    function redeemBCProceeds() external onlyStaked {
+        uint256 timeSinceStake = block.timestamp - stakedTime[msg.sender];
+        uint256 proceeds = timeSinceStake / 1 days;
+        if (proceeds > 0) {
+            bcCoinFactory(msg.sender, proceeds);
+            stakedTime[msg.sender] += proceeds * 1 days;
+        }
+    }
+
+    function bcCoinFactory(address _to, uint256 _amount) private {
+        bcCoin.mint(_to, _amount);
+        emit bcCoinMinted(_to, _amount);
+    }
+
+    function convertBCCoinToPrize(uint256 _BCCoinAmount) external payable {}
+
     function _transfer(address _from, address _to, uint256 _tokenId) internal virtual override {
         super._transfer(_from, _to, _tokenId);
         emit CardTransfer(_tokenId, _from, _to);
@@ -186,6 +232,10 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
 
     function getFirstMintPrice() external view returns (uint256) {
         return firstMintPrice;
+    }
+
+    function getFirstMinted(address minter) external view returns (bool) {
+        return firstMinted[minter];
     }
 
     function getMintPrice() external view returns (uint256) {
@@ -215,4 +265,15 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
     function getCompanyName(address companyAddress) external view returns (string memory) {
         return addressToCompanyName[companyAddress];
     }
+
+    function getMintableAuthorities(address _owner, address _company) external view returns (uint256) {
+        return addressToDivisionToMintable[_owner][_company];
+    }
 }
+
+// modifier 1번 사용시 굳이 함수로 빼지 않아도 될 것 같습니다.
+// mintable count of (mapping name convention)
+// permit
+// erc20 logic
+// erc20 -> marketplace
+// marketplace auction
