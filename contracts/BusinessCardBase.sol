@@ -112,13 +112,24 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         ) {
             revert BusinessCardBase__InvalidString();
         }
-        string memory companyName = addressToCompanyName[_company];
+        if (addressToDivisionToMintable[msg.sender][_company] <= 0) {
+            revert BusinessCardBase__NotMintable();
+        }
+
+        CardType cardType;
+        string memory company = addressToCompanyName[_company];
+        if (bytes(company).length == 0 || (msg.sender == _company)) {
+            cardType = CardType.Personal;
+        } else {
+            cardType = CardType.Business;
+        }
+
         Card memory card = Card({
             name: _name,
             email: _email,
             phone: _phone,
-            company: companyName,
-            cardType: CardType.Personal,
+            company: bytes(company).length == 0 ? "N/A" : company,
+            cardType: cardType,
             valueDesired: valueDesired,
             owner: msg.sender
         });
@@ -127,7 +138,8 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         uint256 _id = cards.length - 1;
         addressToDivisionToMintable[msg.sender][msg.sender] -= 1;
         _safeMint(msg.sender, _id);
-        emit CardCreated(_id, _name, _email, _phone, companyName, valueDesired, msg.sender);
+        if (cardType == CardType.Business) approve(_company, _id);
+        emit CardCreated(_id, _name, _email, _phone, company, valueDesired, msg.sender);
     }
 
     function stake(string memory _company) public payable returns (bool success) {
@@ -204,19 +216,3 @@ contract BusinessCardBase is ERC721EnumerableUpgradeable {
         return addressToCompanyName[companyAddress];
     }
 }
-
-// enumeratorupgradeable
-// mint > 0?
-// internal i 제거
-// mintable
-// event -> address
-// mintCard -> mint
-// 권한 함수 분리
-// Mint, transfer => convention
-// uint32 == uint256 when single
-// company명은 스테이킹 때 기입
-
-// permit
-
-// opcode x and +
-// keccak when comparing strings
